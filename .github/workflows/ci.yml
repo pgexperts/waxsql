@@ -1,0 +1,191 @@
+# waxsql CI
+#
+# Runs on every push to main and every PR. Four jobs:
+#
+#   - lint       — ruff check across waxsql/ + tests/
+#   - typecheck  — mypy on waxsql/ (tests deliberately not type-checked;
+#                  test code uses pytest patterns that mypy doesn't grok
+#                  cleanly without extra config)
+#   - test       — pytest across all tiers (SYNTAX/PARSE/PLAN). A
+#                  `services: postgres:` container provides the live
+#                  DB that PARSE and PLAN need; the WAXSQL_PG_DSN env
+#                  var points the conftest fixture at it. Matrix:
+#                  Python 3.10 / 3.11 / 3.12 / 3.13 to verify the
+#                  `requires-python = ">=3.10"` claim in pyproject.
+#                  The PG service is the same version (17) that
+#                  pglast v7 tracks, so SYNTAX-tier grammar coverage
+#                  matches the live PG's parser version exactly.
+#   - package    — build wheel + sdist, run `twine check` on the
+#                  output, and install the wheel in a clean venv to
+#                  smoke-test that the package is shippable. Catches
+#                  packaging-only bugs (missing data files, broken
+#                  pyproject declarations, PEP 561 marker drops) on
+#                  every push, not just at release time.
+#
+# Lint and typecheck run once on the most-current Python version
+# (faster, and lint/type rules don't change across Python versions
+# in any way we care about). Test runs on the full matrix because
+# real syntax-incompatibility bugs surface only by running.
+#
+# All ${{ ... }} expressions in this file reference workflow-internal
+# values (matrix entries, github.workflow, github.ref). None expand
+# untrusted user input (issue titles, PR bodies, commit messages),
+# so the standard "shell injection from event payload" risk doesn't
+# apply here — but if a future job needs untrusted input, route it
+# through `env:` rather than into a `run:` directly.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs of the same workflow on the same ref when a
+# new commit lands — the latest commit is what matters; older runs
+# burning CI minutes are just waste.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ruff
+        run: pip install 'ruff>=0.5'
+      - name: Lint
+        run: ruff check waxsql tests
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package + mypy
+        # Install the package so mypy resolves intra-package imports
+        # the same way runtime does. mypy is pulled in via the dev
+        # extra which already includes pytest, ruff, etc.
+        run: pip install -e '.[dev]'
+      - name: Type-check
+        run: mypy waxsql
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    strategy:
+      # Run all matrix entries even if one fails — we want to see
+      # which Python versions are broken, not just the first.
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    # PG service container for PARSE/PLAN-tier tests. Pinned to the
+    # same major (17) as the pglast SYNTAX parser so grammar coverage
+    # is consistent across tiers. The container is spun up once per
+    # matrix entry and torn down at job end; no state persists between
+    # runs. Health-check options make GitHub Actions wait for PG to
+    # accept connections before our steps run, avoiding a flaky
+    # "could not connect" race on the first test.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Test-only password with no production analogue — the
+          # container is destroyed when the job ends, the DB is
+          # not network-reachable from outside the runner, and
+          # the DSN is logged in stderr only via the redacted
+          # _redact_dsn path (see issue #41).
+          POSTGRES_PASSWORD: waxsql
+          POSTGRES_DB: waxsql_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      # `tests/conftest.py::pg_conn` reads WAXSQL_PG_DSN; the
+      # `test_plan_with_data.py` and `test_parse.py` fixtures use
+      # the same env var. Matches the default DSN shape psycopg
+      # accepts in key-value form.
+      WAXSQL_PG_DSN: "host=localhost port=5432 user=postgres password=waxsql dbname=waxsql_test"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package + dev extras
+        # [dev] already includes psycopg + pglast + click — see the
+        # pyproject extras block. No need for [all] separately.
+        run: pip install -e '.[dev]'
+      - name: Run full test suite (SYNTAX + PARSE + PLAN tiers)
+        # No --ignore: the PG service container above lets
+        # tests/test_parse.py and tests/test_plan.py run, exercising
+        # the live-DB validation paths including the new
+        # validate --tier plan --with-data flow.
+        run: pytest
+
+  package:
+    name: build & install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build tooling
+        run: pip install build twine
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Twine check
+        # Validates METADATA: ensures README is shipped, classifiers
+        # are real, no warnings about long-description content type
+        # etc. Strict mode (--strict) so a "PASSED with warnings"
+        # outcome fails the job — warnings from twine are usually
+        # real PyPI-listing problems.
+        run: twine check --strict dist/*
+      - name: Smoke-test the wheel in a fresh venv
+        # Verifies the wheel installs and the package imports — catches
+        # broken package-data declarations (e.g. py.typed dropped),
+        # missing modules, and import-time errors that the editable
+        # install elsewhere in CI doesn't notice. Also installs the
+        # [cli] extra and runs `waxsql --version` to confirm the
+        # [project.scripts] entry point is wired correctly — catches
+        # pyproject misconfigurations (typoed module path, missing
+        # function name) that pure `import waxsql` wouldn't see.
+        run: |
+          python -m venv /tmp/smoke
+          # Resolve the wheel path FIRST, then append the [cli] extra.
+          # Writing 'dist/waxsql-*.whl[cli]' as a single glob word does
+          # not work: the trailing [cli] becomes part of the glob pattern
+          # (a literal/character-class), so it never matches the built
+          # wheel (which ends in .whl) — pip then receives the unexpanded
+          # pattern and fails with "Invalid wheel filename". Capturing the
+          # wheel via a glob that matches, then concatenating "[cli]" onto
+          # the resulting filename, is the correct way to install a wheel
+          # with an extra.
+          wheel=$(echo dist/waxsql-*.whl)
+          /tmp/smoke/bin/pip install "${wheel}[cli]"
+          /tmp/smoke/bin/python -c "import waxsql; print('version:', waxsql.__version__)"
+          /tmp/smoke/bin/waxsql --version
+      - name: Upload built distributions as artifact
+        # Stash the artifacts so the release workflow (which runs on
+        # tag push) can download them rather than re-building. The
+        # artifacts cover both formats; release-time publish picks
+        # both up.
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

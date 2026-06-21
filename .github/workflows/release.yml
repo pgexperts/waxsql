@@ -1,0 +1,203 @@
+# waxsql release pipeline.
+#
+# Triggered by pushing a version tag of the form `vX.Y.Z` (e.g.
+# `v1.0.1`, `v1.1.0`). The tag's name MUST match the version in
+# `pyproject.toml`; the workflow verifies this before publishing so
+# a mismatched tag fails fast rather than uploading the wrong artifact.
+#
+# Jobs:
+#   - build       — builds wheel + sdist, runs `twine check --strict`,
+#                   uploads both as a workflow artifact.
+#   - publish     — downloads the artifact, publishes to PyPI via OIDC
+#                   Trusted Publishers. NO API token required — PyPI
+#                   recognizes this workflow by `repo + workflow_file
+#                   + environment` and issues short-lived credentials
+#                   to the action.
+#   - github_release — creates a GitHub Release for the tag with the
+#                      built distributions attached.
+#
+# OIDC setup notes (one-time, in the PyPI account):
+#   1. Go to https://pypi.org/manage/account/publishing/
+#   2. Add a Trusted Publisher with:
+#        owner:      pgexperts
+#        repository: waxsql
+#        workflow:   release.yml
+#        environment: pypi
+#   3. The `environment: pypi` clause below scopes the OIDC token to
+#      a named environment, which lets you require manual approval
+#      via the environment's protection rules if desired.
+#
+# Why a separate release workflow rather than wiring publish into CI:
+# release-on-tag is a deliberate, infrequent operation; coupling it
+# with the per-push CI run would force every PR to think about
+# release configuration. Separating them keeps each workflow's
+# concerns clear.
+#
+# Security note on workflow inputs: the version-verification step
+# reads the tag via the GITHUB_REF environment variable (set by
+# GitHub Actions itself, not user-controlled), not via a `${{ ... }}`
+# expression that would expand untrusted event payload. Tag names
+# are validated by the `on.push.tags` glob (vX.Y.Z, etc.), so the
+# tag content is constrained at the GitHub-API layer before the
+# workflow runs.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      # Permit pre-release tags too (e.g. v1.1.0rc1, v1.1.0.dev1).
+      # PyPI accepts PEP 440 pre-release versions and the action
+      # uploads them without special handling.
+      - "v[0-9]+.[0-9]+.[0-9]+[a-z][0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+.dev[0-9]+"
+
+jobs:
+  gate:
+    name: Gate (lint + typecheck + tests)
+    runs-on: ubuntu-latest
+    # Mirror ci.yml's gates so a tag can NEVER publish code that wouldn't
+    # pass CI. Per-push CI protects `main`; this protects the release ACT
+    # itself — tagging an old/bad SHA, or tagging while main is red, would
+    # otherwise ship straight to PyPI without a quality check. One Python
+    # version (3.13) is enough: the per-push matrix already proved
+    # 3.10-3.13, so this job answers "does THIS commit pass the gates
+    # before we publish it", not "re-run the whole matrix".
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: waxsql
+          POSTGRES_DB: waxsql_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      WAXSQL_PG_DSN: "host=localhost port=5432 user=postgres password=waxsql dbname=waxsql_test"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package + dev extras
+        run: pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check waxsql tests
+      - name: Type-check
+        run: mypy waxsql
+      - name: Test (all tiers, with PG service)
+        run: pytest
+
+  build:
+    name: Build distributions
+    # Gate the entire release pipeline: build -> publish -> github_release
+    # all sit downstream of `build`, so requiring the gate here means a
+    # failing lint/typecheck/test blocks publication.
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build tooling
+        run: pip install build twine
+      - name: Verify tag matches pyproject version
+        # The tag is "vX.Y.Z"; pyproject.toml's [project] version is
+        # "X.Y.Z". A mismatch usually means the maintainer forgot to
+        # bump pyproject before tagging — fail loudly rather than
+        # uploading a wheel whose tag-derived display version
+        # disagrees with its actual metadata version.
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pyproject_version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$tag" != "$pyproject_version" ]; then
+            echo "::error::tag '$tag' != pyproject version '$pyproject_version'"
+            exit 1
+          fi
+          echo "Tag and pyproject version match: $tag"
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Twine check (strict)
+        run: twine check --strict dist/*
+      - name: Smoke-test the wheel in a fresh venv
+        # Mirrors ci.yml's `package` job: `twine check` does NOT install, so
+        # a broken [project.scripts] entry point or a dropped py.typed
+        # marker would otherwise surface only on the already-published
+        # artifact. Resolve the wheel path first, THEN append the [cli]
+        # extra — the [cli] can't be part of the glob pattern (the trailing
+        # [cli] would be read as a glob character class; see ci.yml).
+        run: |
+          python -m venv /tmp/smoke
+          wheel=$(echo dist/waxsql-*.whl)
+          /tmp/smoke/bin/pip install "${wheel}[cli]"
+          /tmp/smoke/bin/python -c "import waxsql; print('version:', waxsql.__version__)"
+          /tmp/smoke/bin/waxsql --version
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The named environment is the second half of the OIDC trust
+    # relationship — Trusted Publishers binds tightly to (repo,
+    # workflow_file, environment). Putting publish in its own
+    # environment also lets you add manual-approval protection
+    # rules at the GitHub-environment level if needed.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/waxsql/
+    permissions:
+      # `id-token: write` is what enables OIDC. Without it, the
+      # pypi-publish action can't request a token from GitHub's OIDC
+      # provider to present to PyPI. NO additional secrets needed.
+      id-token: write
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Default settings publish to PyPI proper. No `repository-url`
+        # override → official PyPI. To dry-run on TestPyPI, add:
+        #   with:
+        #     repository-url: https://test.pypi.org/legacy/
+        # and set up a parallel Trusted Publisher on TestPyPI.
+
+  github_release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generated body from commit messages between tags.
+          # Maintainers can edit the resulting release notes manually
+          # after the workflow completes; this gives a sensible
+          # starting draft.
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz

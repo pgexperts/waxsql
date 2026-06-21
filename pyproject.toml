@@ -1,0 +1,153 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "waxsql"
+version = "1.0.0"
+description = "Random PostgreSQL query generator (wax-fruit SQL for fuzzing & test data)"
+# Tells setuptools to ship README.md as `long_description` in the
+# wheel/sdist metadata and tag it as Markdown — PyPI renders that on
+# the project listing page. Without this, the listing shows only the
+# one-line `description` above.
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Christophe Pettus", email = "christophe.pettus@pgexperts.com" },
+]
+keywords = [
+    "postgres", "postgresql", "sql", "fuzzing", "testing",
+    "query-generator", "deterministic", "test-data",
+]
+# PyPI classifiers. The full list lives at https://pypi.org/classifiers/.
+# The set here drives discoverability and the "filter by topic / Python
+# version" facets on the PyPI search UI. Keep the requires-python
+# constraint in sync with the version-specific classifiers below.
+classifiers = [
+    # No "License :: ..." classifier — PEP 639 + setuptools rejects
+    # the combination of an SPDX license expression (the `license =
+    # "MIT"` above) and the legacy license classifier. The SPDX form
+    # is the modern source of truth.
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage      = "https://github.com/pgexperts/waxsql"
+Repository    = "https://github.com/pgexperts/waxsql"
+Issues        = "https://github.com/pgexperts/waxsql/issues"
+Changelog     = "https://github.com/pgexperts/waxsql/releases"
+
+[project.scripts]
+# Console-script entry point. Lazy-loads click; see waxsql/cli.py for the
+# friendly missing-dep error path that fires when [cli] isn't installed.
+waxsql = "waxsql.cli:main"
+
+[project.optional-dependencies]
+# Optional-dep matrix:
+#   syntax  → SYNTAX-tier validation (pglast). No DB required.
+#   parse   → PARSE-tier validation (psycopg + live PG).
+#   plan    → PLAN-tier validation (same as parse — extras kept distinct
+#             so callers can express intent at install time).
+#   cli     → CLI front-end (click). No DB required.
+#   pprint  → human-readable colorized `gen --pprint` output
+#             (pglast for layout + pygments for color).
+#   all     → everything for the full validation pipeline.
+#   dev     → 'all' plus test/lint/type tooling for contributors.
+#
+# pglast v7 tracks PG17. v8 is in development for PG18; bump the upper
+# pin once it's released and we've validated nothing here breaks.
+syntax = ["pglast>=7.0,<8.0"]
+parse  = ["psycopg[binary]>=3.1"]
+plan   = ["psycopg[binary]>=3.1"]
+cli    = ["click>=8.0"]
+pprint = ["pglast>=7.0,<8.0", "pygments>=2.0"]
+all    = ["pglast>=7.0,<8.0", "psycopg[binary]>=3.1", "click>=8.0", "pygments>=2.0"]
+dev    = [
+    "pytest>=7.0",
+    "pglast>=7.0,<8.0",
+    "psycopg[binary]>=3.1",
+    "click>=8.0",
+    "pygments>=2.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+include = ["waxsql*"]
+
+[tool.setuptools.package-data]
+# PEP 561 marker: ship type hints to downstream consumers. Without
+# the explicit package-data entry, setuptools wouldn't include the
+# zero-byte py.typed marker in the wheel, and external type-checkers
+# (mypy, pyright) would treat waxsql as untyped at the import boundary.
+waxsql = ["py.typed"]
+
+[tool.ruff]
+# Target the lowest-supported Python so ruff catches genuine
+# version-incompatible syntax (e.g. backslash escapes inside
+# f-strings, valid only on 3.12+).
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# pyflakes (F) catches real bugs, pycodestyle (E/W) catches obvious
+# style, bugbear (B) catches common pitfalls (mutable defaults etc.),
+# pyupgrade (UP) flags old-style typing. ANN and D deliberately
+# omitted: the existing comment style is hand-curated and the
+# internals-untyped-at-boundaries pattern (e.g. `conn` in validate/*)
+# is intentional under the optional-dependency constraint.
+select = ["E", "F", "W", "B", "UP"]
+ignore = [
+    "E501",   # line-too-long; comments are intentionally dense
+    "B008",   # call in argument default; the
+              # `field(default_factory=...)` pattern is intentional
+    "UP037",  # quoted forward refs; the explicit-string pattern
+              # is more obvious than relying on PEP 563 magic
+    "UP045",  # `Optional[X]` vs `X | None`; the codebase uses both
+              # interchangeably and a sweeping rewrite is more churn
+              # than benefit
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test-only sentinel patterns: `for w in ...: assert False` shapes
+# guard pytest.raises blocks against silent-pass bugs, and
+# `pytest.raises(Exception)` is the deliberate "anything's a failure"
+# spelling used at a few catch-all checks.
+"tests/*.py" = ["B007", "B011", "B017"]
+
+[tool.mypy]
+# Permissive baseline — the codebase uses type hints throughout but
+# isn't strict-mypy-clean (notably the live-DB validation API takes
+# untyped `conn` parameters because psycopg is an optional dep).
+# Tighten over time as the type-discipline improves; for now, just
+# confirm the existing hints don't contradict each other.
+python_version = "3.10"
+files = ["waxsql"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+# psycopg and pygments are optional deps imported lazily under
+# try/except (validate/* for psycopg, pretty.py for pygments).
+# pygments ships no type stubs at all; psycopg/pglast are only
+# present when their extras are installed. mypy doesn't see the
+# conditional imports as missing, but a downstream consumer without
+# the extra would — so silence the import-untyped/missing noise here.
+module = ["psycopg.*", "pglast.*", "pygments.*"]
+ignore_missing_imports = true

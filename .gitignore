@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test / build caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# uv.lock: waxsql is a library — pyproject declares version *ranges*, so a
+# pinned lockfile isn't tracked. It only drives local `uv` workflows and
+# would otherwise bake one machine's resolution (incl. its Python version)
+# into the repo.
+uv.lock
+
+# Claude Code / agent dev artifacts — never published. The architecture
+# write-up that used to live in CLAUDE.md is now tracked as ARCHITECTURE.md.
+CLAUDE.md
+.claude/
+.codebase-memory/
+
+# Internal dev docs — retained locally, kept out of the public repo. Issue
+# log, code-review outputs, and design specs/plans from development.
+docs/
+ISSUES.md
