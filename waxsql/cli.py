@@ -621,8 +621,13 @@ def validate(
     # click.Path with allow_dash=True does NOT auto-read stdin; we do it here.
     # The distinction between None and '-' matters: both mean stdin, but the
     # user can also explicitly pass '-' as the file argument.
+    #
+    # sys.stdin rather than click.get_text_stream("stdin"): the latter is
+    # deprecated in click 8.5 and removed in click 9.0. It only ever wrapped
+    # the binary stream to fix up encoding on Python 2 and early-3 consoles;
+    # on supported Pythons it hands back sys.stdin for an already-text stream.
     if sql_file == "-":
-        sql_text = click.get_text_stream("stdin").read()
+        sql_text = sys.stdin.read()
     else:
         with open(sql_file, encoding="utf-8") as f:
             sql_text = f.read()
