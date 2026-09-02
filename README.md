@@ -680,6 +680,9 @@ python -c "from waxsql import generate_schema; print(generate_schema(42, 6).emit
 The default DSN for live-DB tests is `dbname=waxsql_test`; override via
 `WAXSQL_PG_DSN` (e.g. `WAXSQL_PG_DSN='host=localhost port=5433 dbname=fuzz' pytest`).
 
+Bugs, questions, and feature ideas belong in
+[GitHub Issues](https://github.com/pgexperts/waxsql/issues).
+
 The release procedure is documented in [`RELEASING.md`](RELEASING.md).
 The architecture and design rationale, including the choices behind the
 type-driven approach and the determinism discipline, are in
