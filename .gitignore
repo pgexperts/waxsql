@@ -34,7 +34,8 @@ CLAUDE.md
 .claude/
 .codebase-memory/
 
-# Internal dev docs — retained locally, kept out of the public repo. Issue
-# log, code-review outputs, and design specs/plans from development.
+# Internal dev docs — retained locally, kept out of the public repo:
+# design specs/plans and the ADR log from development. Issue tracking now
+# lives in GitHub Issues; the pre-1.0 tracker and code-review write-ups
+# were archived out of the tree on 2026-09-01.
 docs/
-ISSUES.md

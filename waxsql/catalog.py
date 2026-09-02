@@ -348,8 +348,10 @@ def default_catalog() -> Catalog:
     # Date/time arithmetic. NOTE: `date ± interval` is intentionally NOT
     # registered — PG types it as `timestamp` (without time zone), a type
     # waxsql doesn't model; declaring it TIMESTAMPTZ was a type-system lie
-    # masked only by PG's implicit timestamp→timestamptz cast (ISSUES.md
-    # #50). `timestamptz ± interval` is correctly typed and kept.
+    # masked only by PG's implicit timestamp→timestamptz cast.
+    # `timestamptz ± interval` is correctly typed and kept. This was found
+    # by spot-check, not by the validation tiers — an implicit cast hides
+    # the whole class; see the catalog-vs-pg_proc audit issue.
     ops.append(OpSig("+", TIMESTAMPTZ, INTERVAL, TIMESTAMPTZ))
     ops.append(OpSig("-", TIMESTAMPTZ, INTERVAL, TIMESTAMPTZ))
     ops.append(OpSig("-", TIMESTAMPTZ, TIMESTAMPTZ, INTERVAL))
